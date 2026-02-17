@@ -1,0 +1,148 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  db:
+    image: postgres:16-alpine
+    container_name: tgbusiness-db
+    restart: always
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-tguser}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-tgpass}
+      POSTGRES_DB: ${POSTGRES_DB:-tgbusiness}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tguser"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - tgbusiness-network
+
+  # Redis
+  redis:
+    image: redis:7-alpine
+    container_name: tgbusiness-redis
+    restart: always
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - tgbusiness-network
+
+  # Backend API
+  backend:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    container_name: tgbusiness-backend
+    restart: always
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://tguser:tgpass@db:5432/tgbusiness
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ../backend:/app
+      - uploads_data:/app/uploads
+    networks:
+      - tgbusiness-network
+
+  # Celery Worker
+  worker:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    container_name: tgbusiness-worker
+    restart: always
+    command: celery -A app.modules.automation.tasks worker --loglevel=info
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://tguser:tgpass@db:5432/tgbusiness
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ../backend:/app
+    networks:
+      - tgbusiness-network
+
+  # Celery Beat (Scheduler)
+  beat:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    container_name: tgbusiness-beat
+    restart: always
+    command: celery -A app.modules.automation.tasks beat --loglevel=info
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://tguser:tgpass@db:5432/tgbusiness
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - tgbusiness-network
+
+  # Frontend
+  frontend:
+    build:
+      context: ../frontend
+      dockerfile: Dockerfile
+    container_name: tgbusiness-frontend
+    restart: always
+    environment:
+      - NEXT_PUBLIC_API_URL=http://backend:8000
+    depends_on:
+      - backend
+    networks:
+      - tgbusiness-network
+
+  # Nginx Reverse Proxy
+  nginx:
+    build:
+      context: ./nginx
+      dockerfile: Dockerfile
+    container_name: tgbusiness-nginx
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/ssl:/etc/nginx/ssl
+    depends_on:
+      - backend
+      - frontend
+    networks:
+      - tgbusiness-network
+
+volumes:
+  postgres_data:
+  redis_data:
+  uploads_data:
+
+networks:
+  tgbusiness-network:
+    driver: bridge
